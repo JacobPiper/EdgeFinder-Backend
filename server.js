@@ -371,14 +371,8 @@ app.get('/api/lines', async (req, res) => {
       ...(cache.oddsapi.data    || []),
     ]
 
-    // Include lines from last 12 hours onwards so we don't miss anything
-    const cutoff = Date.now() - (12 * 60 * 60 * 1000)
-    const filtered = results.filter(l => {
-      if (!l.gameTime) return true
-      try { return new Date(l.gameTime).getTime() > cutoff } catch { return true }
-    })
-
-    res.json({ success: true, count: filtered.length, lines: filtered, fetchedAt: new Date().toISOString() })
+    // Return all lines — frontend handles filtering
+    res.json({ success: true, count: results.length, lines: results, fetchedAt: new Date().toISOString() })
   } catch (e) {
     res.status(500).json({ success: false, error: e.message })
   }
