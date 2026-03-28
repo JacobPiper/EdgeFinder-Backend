@@ -8,10 +8,8 @@ const PORT = process.env.PORT || 3001
 app.use(cors())
 app.use(express.json())
 
-// ── Env vars ────────────────────────────────────────────────────────────────
 const ODDS_API_KEY = process.env.ODDS_API_KEY || 'a5f2fc77fd1ae5479ddcdacafb418b28'
 
-// ── In-memory cache ─────────────────────────────────────────────────────────
 const cache = {
   prizepicks: { data: null, fetchedAt: null },
   underdog:   { data: null, fetchedAt: null },
@@ -20,13 +18,12 @@ const cache = {
   oddsapi:    { data: null, fetchedAt: null },
 }
 
-const TTL = 5 * 60 * 1000 // 5 minutes
+const TTL = 5 * 60 * 1000
 
 function fresh(source) {
   return cache[source].data !== null && Date.now() - cache[source].fetchedAt < TTL
 }
 
-// ── Shared headers for DFS book requests ────────────────────────────────────
 const BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'application/json',
@@ -39,13 +36,24 @@ async function fetchPrizePicks() {
     console.log('[PrizePicks] Fetching...')
     const res = await axios.get(
       'https://api.prizepicks.com/projections?per_page=250&single_stat=true&in_play=false',
-      { headers: { ...BROWSER_HEADERS, Referer: 'https://app.prizepicks.com/', Origin: 'https://app.prizepicks.com' }, timeout: 15000 }
+      {
+        headers: {
+          ...BROWSER_HEADERS,
+          'Referer': 'https://app.prizepicks.com/',
+          'Origin': 'https://app.prizepicks.com',
+          'X-Device-ID': 'web',
+        },
+        timeout: 15000
+      }
     )
 
     const players = {}, leagues = {}
     for (const item of res.data.included || []) {
       if (item.type === 'new_player') {
-        players[item.id] = { name: item.attributes.display_name || item.attributes.name, team: item.attributes.team || '', position: item.attributes.position || '' }
+        players[item.id] = {
+          name: item.attributes.display_name || item.attributes.name,
+          team: item.attributes.team || '',
+        }
       }
       if (item.type === 'league') leagues[item.id] = item.attributes.name
     }
@@ -63,10 +71,10 @@ async function fetchPrizePicks() {
         stat: attr.stat_type,
         line: parseFloat(attr.line_score),
         odds: -110,
+        matchup: attr.description || '',
         gameTime: attr.start_time || new Date().toISOString(),
-        inPlay: !!attr.is_in_play,
       }
-    }).filter(l => !l.inPlay && !isNaN(l.line))
+    }).filter(l => !isNaN(l.line) && l.line > 0)
 
     cache.prizepicks = { data: lines, fetchedAt: Date.now() }
     console.log(`[PrizePicks] ${lines.length} lines cached`)
@@ -91,7 +99,12 @@ async function fetchUnderdog() {
       players[p.id] = { name: `${p.first_name} ${p.last_name}`.trim(), team: p.team_name || '' }
     }
     for (const a of res.data.appearances || []) {
-      appearances[a.id] = { playerId: a.player_id, league: a.sport_id || '', matchup: a.match_title || '', gameTime: a.scheduled_at || '' }
+      appearances[a.id] = {
+        playerId: a.player_id,
+        league: (a.sport_id || '').toUpperCase(),
+        matchup: a.match_title || '',
+        gameTime: a.scheduled_at || ''
+      }
     }
 
     const lines = (res.data.over_under_lines || []).map(line => {
@@ -103,15 +116,14 @@ async function fetchUnderdog() {
         book: 'Underdog',
         player: player.name || 'Unknown',
         team: player.team || '',
-        league: appearance.league || '',
+        league: appearance.league || 'Unknown',
         stat: line.appearance_stat?.display_stat || '',
         line: parseFloat(opt.over_under || 0),
         odds: -110,
         matchup: appearance.matchup || '',
         gameTime: appearance.gameTime || new Date().toISOString(),
-        inPlay: false,
       }
-    }).filter(l => l && !isNaN(l.line))
+    }).filter(l => l && !isNaN(l.line) && l.line > 0)
 
     cache.underdog = { data: lines, fetchedAt: Date.now() }
     console.log(`[Underdog] ${lines.length} lines cached`)
@@ -127,26 +139,20 @@ async function fetchSleeper() {
   try {
     console.log('[Sleeper] Fetching...')
     const res = await axios.get(
-      'https://api.sleeper.com/projections/nfl/player/trending?type=all&limit=100',
+      'https://api.sleeper.com/lines/v1/props?status=open&sport=nfl,nba,mlb,nhl',
       { headers: BROWSER_HEADERS, timeout: 15000 }
     )
 
-    // Sleeper's prop API endpoint
-    const res2 = await axios.get(
-      'https://api.sleeper.com/lines/v1/props?status=open',
-      { headers: BROWSER_HEADERS, timeout: 15000 }
-    )
-
-    const lines = (res2.data || []).map(prop => ({
+    const lines = (res.data || []).map(prop => ({
       book: 'Sleeper',
       player: prop.player_name || prop.display_name || 'Unknown',
       team: prop.team || '',
-      league: prop.sport?.toUpperCase() || 'Unknown',
+      league: (prop.sport || prop.league || 'Unknown').toUpperCase(),
       stat: prop.stat_type || prop.type || '',
-      line: parseFloat(prop.line || 0),
+      line: parseFloat(prop.line || prop.value || 0),
       odds: -110,
-      matchup: prop.game_title || '',
-      gameTime: prop.start_time || new Date().toISOString(),
+      matchup: prop.game_title || prop.matchup || '',
+      gameTime: prop.start_time || prop.game_time || new Date().toISOString(),
     })).filter(l => !isNaN(l.line) && l.line > 0)
 
     cache.sleeper = { data: lines, fetchedAt: Date.now() }
@@ -154,7 +160,30 @@ async function fetchSleeper() {
     return lines
   } catch (e) {
     console.error('[Sleeper] Error:', e.message)
-    return cache.sleeper.data || []
+    // Try alternate endpoint
+    try {
+      const res2 = await axios.get(
+        'https://sleeper.com/lines/v1/props',
+        { headers: BROWSER_HEADERS, timeout: 15000 }
+      )
+      const lines = (res2.data || []).map(prop => ({
+        book: 'Sleeper',
+        player: prop.player_name || 'Unknown',
+        team: prop.team || '',
+        league: (prop.sport || 'Unknown').toUpperCase(),
+        stat: prop.stat_type || '',
+        line: parseFloat(prop.line || 0),
+        odds: -110,
+        matchup: prop.game_title || '',
+        gameTime: prop.start_time || new Date().toISOString(),
+      })).filter(l => !isNaN(l.line) && l.line > 0)
+      cache.sleeper = { data: lines, fetchedAt: Date.now() }
+      console.log(`[Sleeper alt] ${lines.length} lines cached`)
+      return lines
+    } catch (e2) {
+      console.error('[Sleeper alt] Error:', e2.message)
+      return cache.sleeper.data || []
+    }
   }
 }
 
@@ -162,51 +191,73 @@ async function fetchSleeper() {
 async function fetchBetr() {
   try {
     console.log('[Betr] Fetching...')
-    const res = await axios.get(
+    // Try multiple known Betr endpoints
+    const endpoints = [
       'https://api.betrapp.com/v1/props/open',
-      { headers: { ...BROWSER_HEADERS, Referer: 'https://betrapp.com/' }, timeout: 15000 }
-    )
+      'https://api.betrfantasy.com/v1/lines',
+      'https://betrapp.com/api/v1/props',
+    ]
 
-    const lines = (res.data?.props || res.data || []).map(prop => ({
-      book: 'Betr',
-      player: prop.player_name || prop.athlete_name || 'Unknown',
-      team: prop.team || '',
-      league: prop.league || prop.sport || 'Unknown',
-      stat: prop.stat_type || prop.market || '',
-      line: parseFloat(prop.line || prop.value || 0),
-      odds: prop.odds || -110,
-      matchup: prop.game || prop.matchup || '',
-      gameTime: prop.game_time || prop.start_time || new Date().toISOString(),
-    })).filter(l => !isNaN(l.line) && l.line > 0)
+    for (const url of endpoints) {
+      try {
+        const res = await axios.get(url, {
+          headers: { ...BROWSER_HEADERS, Referer: 'https://betrapp.com/' },
+          timeout: 8000
+        })
+        const data = res.data?.props || res.data?.lines || res.data || []
+        if (Array.isArray(data) && data.length > 0) {
+          const lines = data.map(prop => ({
+            book: 'Betr',
+            player: prop.player_name || prop.athlete_name || prop.name || 'Unknown',
+            team: prop.team || '',
+            league: (prop.league || prop.sport || 'Unknown').toUpperCase(),
+            stat: prop.stat_type || prop.market || prop.type || '',
+            line: parseFloat(prop.line || prop.value || prop.over_under || 0),
+            odds: prop.odds || -110,
+            matchup: prop.game || prop.matchup || prop.game_title || '',
+            gameTime: prop.game_time || prop.start_time || new Date().toISOString(),
+          })).filter(l => !isNaN(l.line) && l.line > 0)
 
-    cache.betr = { data: lines, fetchedAt: Date.now() }
-    console.log(`[Betr] ${lines.length} lines cached`)
-    return lines
+          cache.betr = { data: lines, fetchedAt: Date.now() }
+          console.log(`[Betr] ${lines.length} lines cached from ${url}`)
+          return lines
+        }
+      } catch (err) {
+        console.error(`[Betr] ${url} failed:`, err.message)
+      }
+    }
+
+    cache.betr = { data: [], fetchedAt: Date.now() }
+    return []
   } catch (e) {
     console.error('[Betr] Error:', e.message)
     return cache.betr.data || []
   }
 }
 
-// ── THE ODDS API (DraftKings, FanDuel etc for comparison) ────────────────────
+// ── THE ODDS API (DraftKings, FanDuel, BetMGM) ───────────────────────────────
 async function fetchOddsAPI() {
   try {
     console.log('[OddsAPI] Fetching player props...')
 
     const SPORTS = ['americanfootball_nfl', 'basketball_nba', 'baseball_mlb', 'icehockey_nhl']
     const BOOKS  = ['draftkings', 'fanduel', 'betmgm']
+    const MARKETS = [
+      'player_points', 'player_rebounds', 'player_assists', 'player_threes',
+      'player_passing_yards', 'player_rushing_yards', 'player_receiving_yards',
+      'player_receptions', 'player_strikeouts', 'player_hits'
+    ].join(',')
 
     const allLines = []
 
     for (const sport of SPORTS) {
       try {
-        // Get upcoming events first
         const eventsRes = await axios.get(
           `https://api.the-odds-api.com/v4/sports/${sport}/events`,
           { params: { apiKey: ODDS_API_KEY }, timeout: 10000 }
         )
 
-        const events = (eventsRes.data || []).slice(0, 5) // limit to 5 events per sport to save credits
+        const events = (eventsRes.data || []).slice(0, 4)
 
         for (const event of events) {
           try {
@@ -216,7 +267,7 @@ async function fetchOddsAPI() {
                 params: {
                   apiKey: ODDS_API_KEY,
                   regions: 'us',
-                  markets: 'player_points,player_rebounds,player_assists,player_threes,player_passing_yards,player_rushing_yards,player_receiving_yards',
+                  markets: MARKETS,
                   bookmakers: BOOKS.join(','),
                   oddsFormat: 'american',
                 },
@@ -226,6 +277,9 @@ async function fetchOddsAPI() {
 
             const matchup  = `${event.away_team} vs ${event.home_team}`
             const gameTime = event.commence_time
+            const league   = sport.includes('nfl') ? 'NFL'
+              : sport.includes('nba') ? 'NBA'
+              : sport.includes('mlb') ? 'MLB' : 'NHL'
 
             for (const bookmaker of propsRes.data?.bookmakers || []) {
               const bookName = bookmaker.key === 'draftkings' ? 'DraftKings'
@@ -243,12 +297,9 @@ async function fetchOddsAPI() {
                   if (outcome.name === 'Over') {
                     allLines.push({
                       book: bookName,
-                      player: outcome.description || outcome.name,
+                      player: outcome.description || '',
                       team: '',
-                      league: sport.includes('nfl') ? 'NFL'
-                        : sport.includes('nba') ? 'NBA'
-                        : sport.includes('mlb') ? 'MLB'
-                        : 'NHL',
+                      league,
                       stat: statName,
                       line: parseFloat(outcome.point || 0),
                       odds: outcome.price || -110,
@@ -260,7 +311,7 @@ async function fetchOddsAPI() {
               }
             }
           } catch (eventErr) {
-            // Skip individual event errors
+            console.error(`[OddsAPI] event error:`, eventErr.message)
           }
         }
       } catch (sportErr) {
@@ -277,7 +328,6 @@ async function fetchOddsAPI() {
   }
 }
 
-// ── Refresh all sources ──────────────────────────────────────────────────────
 async function refreshAll() {
   console.log('--- Refreshing all sources ---')
   await Promise.allSettled([
@@ -291,7 +341,6 @@ async function refreshAll() {
 }
 
 // ── Routes ───────────────────────────────────────────────────────────────────
-
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
@@ -306,38 +355,35 @@ app.get('/', (req, res) => {
   })
 })
 
-// Main endpoint — all lines combined, pre-match only
 app.get('/api/lines', async (req, res) => {
   try {
-    const results = []
-
-    // DFS books
     if (!fresh('prizepicks')) await fetchPrizePicks()
     if (!fresh('underdog'))   await fetchUnderdog()
     if (!fresh('sleeper'))    await fetchSleeper()
     if (!fresh('betr'))       await fetchBetr()
     if (!fresh('oddsapi'))    await fetchOddsAPI()
 
-    results.push(...(cache.prizepicks.data || []))
-    results.push(...(cache.underdog.data   || []))
-    results.push(...(cache.sleeper.data    || []))
-    results.push(...(cache.betr.data       || []))
-    results.push(...(cache.oddsapi.data    || []))
+    const results = [
+      ...(cache.prizepicks.data || []),
+      ...(cache.underdog.data   || []),
+      ...(cache.sleeper.data    || []),
+      ...(cache.betr.data       || []),
+      ...(cache.oddsapi.data    || []),
+    ]
 
-    // Show lines — include anything from last 6 hours onwards (covers live + upcoming)
-    const cutoff = Date.now() - (6 * 60 * 60 * 1000)
-    const preMatch = results.filter(l => {
+    // Include lines from last 12 hours onwards so we don't miss anything
+    const cutoff = Date.now() - (12 * 60 * 60 * 1000)
+    const filtered = results.filter(l => {
       if (!l.gameTime) return true
       try { return new Date(l.gameTime).getTime() > cutoff } catch { return true }
     })
 
-    res.json({ success: true, count: preMatch.length, lines: preMatch, fetchedAt: new Date().toISOString() })
+    res.json({ success: true, count: filtered.length, lines: filtered, fetchedAt: new Date().toISOString() })
   } catch (e) {
     res.status(500).json({ success: false, error: e.message })
   }
 })
 
-// Individual book endpoints
 app.get('/api/lines/prizepicks', async (req, res) => {
   if (!fresh('prizepicks')) await fetchPrizePicks()
   res.json({ success: true, count: cache.prizepicks.data?.length || 0, lines: cache.prizepicks.data || [] })
@@ -355,13 +401,11 @@ app.get('/api/lines/betr', async (req, res) => {
   res.json({ success: true, count: cache.betr.data?.length || 0, lines: cache.betr.data || [] })
 })
 
-// Force refresh
 app.post('/api/refresh', async (req, res) => {
   await refreshAll()
   res.json({ success: true, message: 'All sources refreshed' })
 })
 
-// Status
 app.get('/api/status', (req, res) => {
   res.json({
     prizepicks: { count: cache.prizepicks.data?.length || 0, fresh: fresh('prizepicks'), fetchedAt: cache.prizepicks.fetchedAt ? new Date(cache.prizepicks.fetchedAt).toISOString() : null },
@@ -372,12 +416,10 @@ app.get('/api/status', (req, res) => {
   })
 })
 
-// ── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log(`EdgeFinder API running on port ${PORT}`)
   await refreshAll()
   console.log('Ready.')
 })
 
-// Refresh every 5 minutes
 setInterval(refreshAll, TTL)
