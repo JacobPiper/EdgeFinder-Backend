@@ -324,11 +324,11 @@ app.get('/api/lines', async (req, res) => {
     results.push(...(cache.betr.data       || []))
     results.push(...(cache.oddsapi.data    || []))
 
-    // Pre-match only — filter out anything that's already started
-    const now = Date.now()
+    // Show lines — include anything from last 6 hours onwards (covers live + upcoming)
+    const cutoff = Date.now() - (6 * 60 * 60 * 1000)
     const preMatch = results.filter(l => {
       if (!l.gameTime) return true
-      try { return new Date(l.gameTime).getTime() > now } catch { return true }
+      try { return new Date(l.gameTime).getTime() > cutoff } catch { return true }
     })
 
     res.json({ success: true, count: preMatch.length, lines: preMatch, fetchedAt: new Date().toISOString() })
