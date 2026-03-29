@@ -17,15 +17,15 @@ const TTL = 6 * 60 * 1000
 async function fetchUnderdog() {
   try {
     console.log('[Underdog] Fetching via ScraperAPI...')
-    
     const targetUrl = 'https://api.underdogfantasy.com/v1/over_under_lines'
     const scraperUrl = `http://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(targetUrl)}`
-    
     const res = await axios.get(scraperUrl, { timeout: 60000 })
-    
     const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data
-    
+
+    console.log('[Underdog] Keys:', Object.keys(data).join(', '))
+
     const players = {}, appearances = {}
+
     for (const p of data.players || []) {
       players[p.id] = { name: `${p.first_name} ${p.last_name}`.trim(), team: p.team_name || '' }
     }
@@ -37,6 +37,10 @@ async function fetchUnderdog() {
         gameTime: a.scheduled_at || '',
       }
     }
+
+    console.log('[Underdog] players:', Object.keys(players).length)
+    console.log('[Underdog] appearances:', Object.keys(appearances).length)
+    console.log('[Underdog] over_under_lines:', (data.over_under_lines || []).length)
 
     const lines = (data.over_under_lines || []).map(line => {
       const opt = line.options?.[0]
